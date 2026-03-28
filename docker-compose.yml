@@ -1,6 +1,9 @@
 services:
   gphotos-backup:
-    build: .
+    # Use the pre-built image from Docker Hub:
+    image: ajkuftic/gphotos-backup:latest
+    # Or build locally instead:
+    # build: .
     volumes:
       - ./config:/config   # place credentials.json here; token.json is saved here
       - ./data:/data        # photos land under data/photos/YYYY/MM/

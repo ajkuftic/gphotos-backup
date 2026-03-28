@@ -1,5 +1,7 @@
 # gphotos-backup
 
+[![Build and push Docker image](https://github.com/ajkuftic/gphotos-backup/actions/workflows/docker.yml/badge.svg)](https://github.com/ajkuftic/gphotos-backup/actions/workflows/docker.yml)
+
 A Docker container that downloads full-quality photos and videos from Google Photos — both your own library and albums shared with you.
 
 Files are organised on disk as:
@@ -15,6 +17,44 @@ data/
         ...
   backup_state.json   ← tracks what has already been downloaded
 ```
+
+---
+
+## Pulling from Docker Hub
+
+The image is published automatically to Docker Hub on every push to `main` and on version tags.
+
+```bash
+# Latest build from main
+docker pull ajkuftic/gphotos-backup:latest
+
+# Specific release
+docker pull ajkuftic/gphotos-backup:v1.0.0
+```
+
+Use `ajkuftic/gphotos-backup` in place of `gphotos-backup` in all commands below.
+
+---
+
+## Publishing setup (repo maintainer only)
+
+The CI workflow requires two GitHub Actions secrets:
+
+| Secret | Value |
+|---|---|
+| `DOCKERHUB_USERNAME` | Your Docker Hub username |
+| `DOCKERHUB_TOKEN` | A Docker Hub [access token](https://hub.docker.com/settings/security) (read/write) |
+
+Add them at *Settings → Secrets and variables → Actions → New repository secret*.
+
+Releases are tagged by pushing a version tag:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+This produces `:v1.0.0`, `:v1.0`, `:v1`, and `:latest` tags on Docker Hub.
 
 ---
 
