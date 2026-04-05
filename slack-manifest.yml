@@ -1,0 +1,34 @@
+display_information:
+  name: Slackline
+  description: Unfurls TikTok, Instagram, and Bluesky links with playable video previews.
+  background_color: "#1a1a2e"
+
+features:
+  bot_user:
+    display_name: Slackline
+    always_online: false
+  unfurl_domains:
+    - tiktok.com
+    - vm.tiktok.com
+    - vt.tiktok.com
+    - instagram.com
+    - www.instagram.com
+    - bsky.app
+
+oauth_config:
+  scopes:
+    bot:
+      - links:read
+      - links:write
+      - links.embed:write
+
+settings:
+  event_subscriptions:
+    request_url: https://YOUR_SERVICE_URL/slack/events
+    bot_events:
+      - link_shared
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
