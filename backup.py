@@ -27,7 +27,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 # Configuration
 # ---------------------------------------------------------------------------
 
-SCOPES = ["https://www.googleapis.com/auth/photoslibrary.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/photoslibrary.readonly.originals"]
 API_BASE = "https://photoslibrary.googleapis.com/v1"
 
 CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", "/config"))
