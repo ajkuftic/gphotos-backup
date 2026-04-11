@@ -64,7 +64,7 @@ This produces `:v1.0.0`, `:v1.0`, `:v1`, and `:latest` tags on Docker Hub.
 2. Enable the **Photos Library API**: *APIs & Services → Library → search "Photos Library API" → Enable*.
 3. Configure the OAuth consent screen: *APIs & Services → OAuth consent screen*.
    - User type: **External** (or Internal if you use Workspace).
-   - Add the scope `https://www.googleapis.com/auth/photoslibrary.readonly`.
+   - Add the scope `https://www.googleapis.com/auth/photoslibrary.readonly.originals` ("View your Google Photos library and metadata" — labeled **Photos Library API**).
    - Add your Google account as a test user.
 4. Create credentials: *APIs & Services → Credentials → Create Credentials → OAuth client ID*.
    - Application type: **Desktop app**.
