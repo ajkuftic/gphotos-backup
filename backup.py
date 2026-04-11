@@ -128,6 +128,11 @@ class PhotosClient:
                 )
                 time.sleep(wait)
                 continue
+            if not resp.ok:
+                log.error(
+                    "HTTP %s from %s\nResponse body: %s",
+                    resp.status_code, url, resp.text,
+                )
             resp.raise_for_status()
             return resp
         raise RuntimeError(f"Request failed after 6 attempts: {method} {url}")
