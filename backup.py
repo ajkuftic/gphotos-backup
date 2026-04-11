@@ -83,7 +83,8 @@ def authenticate() -> Credentials:
                 str(CREDENTIALS_FILE), SCOPES
             )
             creds = flow.run_local_server(
-                host="0.0.0.0",
+                host="localhost",      # used for redirect_uri sent to Google
+                bind_addr="0.0.0.0",  # bind all interfaces so Docker port-mapping works
                 port=8080,
                 open_browser=False,
                 prompt="consent",
