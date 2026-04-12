@@ -9,7 +9,10 @@ services:
       - ./data:/data        # photos land under data/photos/YYYY/MM/
     environment:
       - PYTHONUNBUFFERED=1
-    # Port 8080 is only needed during first-time authentication.
+      # Override AUTH_PORT if 8080 is already in use on the host.
+      # Match the port in your SSH tunnel: ssh -L <AUTH_PORT>:localhost:<AUTH_PORT> user@host
+      # - AUTH_PORT=9090
+    # Port is only needed during first-time authentication.
     # Comment it out after the token has been saved.
     ports:
-      - "8080:8080"
+      - "${AUTH_PORT:-8080}:${AUTH_PORT:-8080}"
