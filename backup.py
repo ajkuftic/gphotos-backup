@@ -27,11 +27,12 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 # Configuration
 # ---------------------------------------------------------------------------
 
-SCOPES = ["https://www.googleapis.com/auth/photoslibrary.readonly.originals"]
+SCOPES = ["https://www.googleapis.com/auth/photoslibrary.readonly"]
 API_BASE = "https://photoslibrary.googleapis.com/v1"
 
 CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", "/config"))
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
+AUTH_PORT = int(os.environ.get("AUTH_PORT", "8080"))
 TOKEN_FILE = CONFIG_DIR / "token.json"
 CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"
 STATE_FILE = DATA_DIR / "backup_state.json"
@@ -85,7 +86,7 @@ def authenticate() -> Credentials:
             creds = flow.run_local_server(
                 host="localhost",      # used for redirect_uri sent to Google
                 bind_addr="0.0.0.0",  # bind all interfaces so Docker port-mapping works
-                port=8080,
+                port=AUTH_PORT,
                 open_browser=False,
                 prompt="consent",
             )
