@@ -4,95 +4,75 @@
 
 A Docker container that downloads full-quality photos and videos from Google Photos — both your own library and albums shared with you.
 
-Files are organised on disk as:
+**No Google Cloud project or API credentials required.** Authentication uses a browser session (same as logging in at photos.google.com), which sidesteps the Google Photos Library API access restrictions.
+
+Files are organised as:
 
 ```
 data/
   photos/
     2024/
       01/
-        IMG_1234.jpg
-        VID_5678.mp4
+        IMG_20240115_142030.jpg
+        VID_20240115_143200.mp4
       02/
         ...
-  backup_state.json   ← tracks what has already been downloaded
+    unsorted/      ← items whose date can't be inferred from filename
+  backup_state.json
 ```
 
 ---
 
-## Pulling from Docker Hub
+## How it works
 
-The image is published automatically to Docker Hub on every push to `main` and on version tags.
-
-```bash
-# Latest build from main
-docker pull ajkuftic/gphotos-backup:latest
-
-# Specific release
-docker pull ajkuftic/gphotos-backup:v1.0.0
-```
-
-Use `ajkuftic/gphotos-backup` in place of `gphotos-backup` in all commands below.
+- Playwright (headless Chromium) logs in to `photos.google.com` using a saved browser session
+- Scrolls through your library and shared albums, collecting CDN URLs (`lh3.googleusercontent.com/...`)
+- Downloads each item at full quality: `base_url + "=d"` for photos, `"=dv"` for videos
+- Tracks downloaded items by CDN ID in `backup_state.json` so re-runs skip already-downloaded files
 
 ---
 
-## Publishing setup (repo maintainer only)
+## 1. Authenticate (once)
 
-The CI workflow requires two GitHub Actions secrets:
-
-| Secret | Value |
-|---|---|
-| `DOCKERHUB_USERNAME` | Your Docker Hub username |
-| `DOCKERHUB_TOKEN` | A Docker Hub [access token](https://hub.docker.com/settings/security) (read/write) |
-
-Add them at *Settings → Secrets and variables → Actions → New repository secret*.
-
-Releases are tagged by pushing a version tag:
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-This produces `:v1.0.0`, `:v1.0`, `:v1`, and `:latest` tags on Docker Hub.
-
----
-
-## 1. Create Google Cloud OAuth credentials
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com/) and create a project (or select an existing one).
-2. Enable the **Photos Library API**: *APIs & Services → Library → search "Photos Library API" → Enable*.
-3. Configure the OAuth consent screen: *APIs & Services → OAuth consent screen*.
-   - User type: **External** (or Internal if you use Workspace).
-   - Add the scope `https://www.googleapis.com/auth/photoslibrary.readonly` ("View your Google Photos library" — labeled **Photos Library API**).
-   - Add your Google account as a test user.
-4. Create credentials: *APIs & Services → Credentials → Create Credentials → OAuth client ID*.
-   - Application type: **Desktop app**.
-5. Download the JSON file and save it as **`config/credentials.json`** next to this repository.
-
----
-
-## 2. Authenticate (first run only)
-
-The OAuth redirect goes to `http://localhost:8080`, so port 8080 must be reachable from your browser to the container.
+The auth step opens a headed browser window so you can sign in to Google. **This must be run on a machine with a display** (your laptop or desktop, not a headless server).
 
 ```bash
 mkdir -p config data
 
-# Build the image
-docker compose build
+# Pull the image
+docker compose pull
 
-# Trigger the OAuth flow (port 8080 forwarded)
-docker compose run --rm gphotos-backup --auth-only
+# Open the browser, sign in to Google Photos, close when redirected to the library
+docker compose run --rm gphotos-auth
 ```
 
-The script will print a Google authorization URL. Open it in your browser, grant access, and the browser will redirect to `localhost:8080` — the container captures the code and saves a token to `config/token.json`.
+> **macOS / Windows:** Replace the `gphotos-auth` service command with:
+> ```bash
+> docker run --rm -v "$(pwd)/config:/config" \
+>   -e DISPLAY=host.docker.internal:0 \
+>   ajkuftic/gphotos-backup:latest --auth-only
+> ```
+> You'll need XQuartz (macOS) or VcXsrv (Windows) running.
 
-Once `config/token.json` exists you no longer need port 8080 for backups.
+The session is saved to `config/browser-data/`.
+
+### Authenticating for a remote server (NAS)
+
+Run auth on your local machine, then copy the session:
+
+```bash
+# On your local machine
+docker compose run --rm gphotos-auth
+
+# Copy to the remote server
+rsync -av ./config/browser-data/ user@your-nas:/path/to/gphotos-backup/config/browser-data/
+```
+
+After that, all backup runs on the server are fully headless — no display needed.
 
 ---
 
-## 3. Run a backup
+## 2. Run a backup
 
 ```bash
 # Your own library only
@@ -101,28 +81,16 @@ docker compose run --rm gphotos-backup
 # Your library + all albums shared with you
 docker compose run --rm gphotos-backup --include-shared
 
-# Only shared albums (useful if the library belongs to someone else)
+# Only shared albums
 docker compose run --rm gphotos-backup --shared-only
 
-# Preview what would be downloaded without downloading anything
+# Preview what would be downloaded without downloading
 docker compose run --rm gphotos-backup --include-shared --dry-run
-```
-
-### Running without docker compose
-
-```bash
-docker run --rm \
-  -v "$(pwd)/config:/config" \
-  -v "$(pwd)/data:/data" \
-  gphotos-backup \
-  --include-shared
 ```
 
 ---
 
-## 4. Scheduling
-
-Add a cron entry on the host to run the backup nightly:
+## 3. Scheduling
 
 ```cron
 0 2 * * * cd /path/to/gphotos-backup && docker compose run --rm gphotos-backup --include-shared >> /var/log/gphotos-backup.log 2>&1
@@ -134,20 +102,41 @@ Add a cron entry on the host to run the backup nightly:
 
 | Flag | Description |
 |---|---|
-| `--auth-only` | Authenticate and save token, then exit. Requires `-p 8080:8080`. |
-| `--include-shared` | Also download from albums shared with you. |
-| `--shared-only` | Only download from albums shared with you. |
-| `--dry-run` | List what would be downloaded without downloading. |
-| `--debug` | Verbose logging. |
+| `--auth-only` | Open headed browser to sign in and save session, then exit |
+| `--include-shared` | Also download albums shared with you |
+| `--shared-only` | Only download albums shared with you |
+| `--dry-run` | List what would be downloaded without downloading |
+| `--debug` | Verbose logging |
 
 Environment variables `CONFIG_DIR` and `DATA_DIR` override the default `/config` and `/data` paths.
 
 ---
 
-## How it works
+## Session expiry
 
-- **Photos** are downloaded at original quality using `baseUrl + "=d"`.
-- **Videos** are downloaded as the original video file using `baseUrl + "=dv"` (without this suffix you get only a thumbnail).
-- The `baseUrl` returned by the API expires after ~1 hour, so the script re-fetches each item's URL immediately before downloading.
-- `backup_state.json` maps Google Photos item IDs to local paths. A file is skipped on subsequent runs if its ID is already recorded **and** the local file still exists.
-- Downloads use a `.part` temporary file and rename atomically on completion, so interrupted runs leave no corrupt files.
+Google sessions typically last weeks to months. When the session expires, the backup will log "Not signed in" and exit. Re-run `gphotos-auth` to refresh it.
+
+---
+
+## Docker Hub
+
+```bash
+docker pull ajkuftic/gphotos-backup:latest
+```
+
+Images are built automatically on every push to `main` and on version tags (`v1.2.3`), for both `linux/amd64` and `linux/arm64`.
+
+### Publishing setup (maintainer)
+
+Two GitHub Actions secrets are required:
+
+| Secret | Value |
+|---|---|
+| `DOCKERHUB_USERNAME` | Docker Hub username |
+| `DOCKERHUB_TOKEN` | Docker Hub access token (read/write) |
+
+To cut a release:
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
