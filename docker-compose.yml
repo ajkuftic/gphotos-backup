@@ -1,18 +1,25 @@
 services:
+
+  # Headless backup — runs anywhere after auth
   gphotos-backup:
-    # Use the pre-built image from Docker Hub:
     image: ajkuftic/gphotos-backup:latest
-    # Or build locally instead:
     # build: .
     volumes:
-      - ./config:/config   # place credentials.json here; token.json is saved here
-      - ./data:/data        # photos land under data/photos/YYYY/MM/
+      - ./config:/config   # browser-data/ lives here (saved session)
+      - ./data:/data        # photos downloaded to data/photos/YYYY/MM/
     environment:
       - PYTHONUNBUFFERED=1
-      # Override AUTH_PORT if 8080 is already in use on the host.
-      # Match the port in your SSH tunnel: ssh -L <AUTH_PORT>:localhost:<AUTH_PORT> user@host
-      # - AUTH_PORT=9090
-    # Port is only needed during first-time authentication.
-    # Comment it out after the token has been saved.
-    ports:
-      - "${AUTH_PORT:-8080}:${AUTH_PORT:-8080}"
+
+  # Headed auth — run once on a LOCAL machine that has a display.
+  # After signing in, copy config/browser-data/ to your server.
+  gphotos-auth:
+    image: ajkuftic/gphotos-backup:latest
+    # build: .
+    volumes:
+      - ./config:/config
+      - /tmp/.X11-unix:/tmp/.X11-unix   # share host X11 socket
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DISPLAY=${DISPLAY:-:0}
+    network_mode: host   # required for X11 auth to work without xhost tricks
+    command: ["--auth-only"]

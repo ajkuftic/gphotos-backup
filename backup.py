@@ -1,42 +1,37 @@
 #!/usr/bin/env python3
 """
-Google Photos Backup
-Downloads full-quality photos and videos from your library and shared albums.
+Google Photos Backup via Playwright browser automation.
 
-Directory layout on disk:
-  /data/photos/YYYY/MM/<filename>
-
-State is tracked in /data/backup_state.json so interrupted runs resume cleanly.
+Uses the Google Photos web interface instead of the restricted Photos Library API.
+The Chromium session is persisted in /config/browser-data between runs —
+authenticate once on a machine with a display, then run headlessly anywhere.
 """
 
+import argparse
+import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import time
-import argparse
 from pathlib import Path
-from datetime import datetime
 
 import requests
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
-from google_auth_oauthlib.flow import InstalledAppFlow
+from playwright.async_api import async_playwright, BrowserContext, Page
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-SCOPES = ["https://www.googleapis.com/auth/photoslibrary.readonly"]
-API_BASE = "https://photoslibrary.googleapis.com/v1"
-
 CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", "/config"))
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
-AUTH_PORT = int(os.environ.get("AUTH_PORT", "8080"))
-TOKEN_FILE = CONFIG_DIR / "token.json"
-CREDENTIALS_FILE = CONFIG_DIR / "credentials.json"
+BROWSER_DATA_DIR = CONFIG_DIR / "browser-data"
 STATE_FILE = DATA_DIR / "backup_state.json"
 PHOTOS_DIR = DATA_DIR / "photos"
+
+GPHOTOS_URL = "https://photos.google.com"
+SHARING_URL = "https://photos.google.com/sharing"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,218 +41,280 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+MIME_TO_EXT: dict[str, str] = {
+    "image/jpeg": ".jpg",  "image/png": ".png",   "image/gif": ".gif",
+    "image/webp": ".webp", "image/heic": ".heic", "image/heif": ".heif",
+    "image/tiff": ".tiff", "image/bmp": ".bmp",
+    "video/mp4": ".mp4",   "video/quicktime": ".mov",
+    "video/x-msvideo": ".avi", "video/webm": ".webm",
+    "video/3gpp": ".3gp",  "video/mpeg": ".mpeg", "video/x-matroska": ".mkv",
+}
+
+# Flags required for Chromium running inside Docker (especially as root)
+_CHROMIUM_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-dev-shm-usage",  # avoids /dev/shm OOM crashes (64 MB Docker default)
+    "--no-sandbox",             # required when running as root in Docker
+    "--disable-gpu",
+]
+
 
 # ---------------------------------------------------------------------------
-# Authentication
+# Browser helpers
 # ---------------------------------------------------------------------------
 
-def authenticate() -> Credentials:
-    """Return valid Google API credentials, triggering OAuth flow if needed."""
-    creds = None
+async def _open_context(pw, *, headless: bool) -> BrowserContext:
+    BROWSER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    return await pw.chromium.launch_persistent_context(
+        str(BROWSER_DATA_DIR),
+        headless=headless,
+        args=_CHROMIUM_ARGS,
+        viewport={"width": 1280, "height": 900},
+        accept_downloads=True,
+    )
 
-    if TOKEN_FILE.exists():
-        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            log.info("Refreshing access token…")
-            creds.refresh(Request())
-        else:
-            if not CREDENTIALS_FILE.exists():
-                log.error(
-                    "OAuth credentials not found at %s\n"
-                    "Please follow the setup instructions in README.md to create "
-                    "OAuth 2.0 credentials in Google Cloud Console and download "
-                    "the JSON file to /config/credentials.json.",
-                    CREDENTIALS_FILE,
-                )
+async def _is_signed_in(page: Page) -> bool:
+    """Navigate to Google Photos and return True if already signed in."""
+    await page.goto(GPHOTOS_URL, wait_until="domcontentloaded", timeout=30_000)
+    url = page.url
+    return (
+        "accounts.google.com" not in url
+        and "ServiceLogin" not in url
+        and "signin" not in url.lower()
+    )
+
+
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+
+async def do_auth() -> None:
+    """
+    Open a headed Chromium window for the user to sign in to Google Photos.
+    The session (cookies + local storage) is saved to BROWSER_DATA_DIR and
+    reused by subsequent headless backup runs.
+    """
+    log.info("Opening browser for sign-in…")
+    log.info(
+        "If this machine has no display, authenticate on your LOCAL machine instead:\n"
+        "  docker compose run --rm gphotos-auth   (on local machine)\n"
+        "  rsync -av ./config/browser-data/ user@server:/path/to/config/browser-data/\n"
+        "  (then run the backup on the server headlessly)"
+    )
+
+    async with async_playwright() as pw:
+        ctx = await _open_context(pw, headless=False)
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        await page.goto(GPHOTOS_URL)
+
+        if not await _is_signed_in(page):
+            log.info("Please sign in to Google in the browser window (5-minute timeout)…")
+            try:
+                await page.wait_for_url(f"{GPHOTOS_URL}/**", timeout=300_000)
+            except Exception:
+                log.error("Sign-in timed out.")
+                await ctx.close()
                 sys.exit(1)
 
-            log.info(
-                "Starting OAuth flow.\n"
-                "  1. Open the URL printed below in your browser.\n"
-                "  2. Authorize the application.\n"
-                "  3. The browser will redirect to http://localhost:8080 — "
-                "make sure port 8080 is forwarded from the container to your host.\n"
-            )
-            flow = InstalledAppFlow.from_client_secrets_file(
-                str(CREDENTIALS_FILE), SCOPES
-            )
-            creds = flow.run_local_server(
-                host="localhost",      # used for redirect_uri sent to Google
-                bind_addr="0.0.0.0",  # bind all interfaces so Docker port-mapping works
-                port=AUTH_PORT,
-                open_browser=False,
-                prompt="consent",
-            )
-
-        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_FILE.write_text(creds.to_json())
-        log.info("Token saved to %s", TOKEN_FILE)
-
-    return creds
+        log.info("Signed in — session saved to %s", BROWSER_DATA_DIR)
+        await ctx.close()
 
 
 # ---------------------------------------------------------------------------
-# API client
+# Media extraction
 # ---------------------------------------------------------------------------
 
-class PhotosClient:
-    """Thin wrapper around the Google Photos Library REST API."""
+# JavaScript injected into the page to extract visible media items.
+# Returns [{cdnId, base, isVideo, href}] for every photo/video anchor found.
+_EXTRACT_JS = """
+() => {
+    const results = [];
+    const seen = new Set();
 
-    def __init__(self, creds: Credentials) -> None:
-        self.creds = creds
-        self.session = requests.Session()
-        self._update_auth_header()
+    for (const a of document.querySelectorAll('a[href*="/photo/"]')) {
+        const img = a.querySelector('img[src*="lh3.googleusercontent.com"]');
+        if (!img || !img.src) continue;
 
-    def _update_auth_header(self) -> None:
-        if self.creds.expired and self.creds.refresh_token:
-            self.creds.refresh(Request())
-        self.session.headers.update(
-            {"Authorization": f"Bearer {self.creds.token}"}
-        )
+        // Strip resolution/format suffix — everything from '=' to end
+        const base = img.src.replace(/=[^/]*$/, '');
+        if (!base.includes('lh3.googleusercontent.com')) continue;
 
-    def _request(self, method: str, url: str, **kwargs):
-        for attempt in range(6):
-            self._update_auth_header()
-            resp = self.session.request(method, url, **kwargs)
-            if resp.status_code in (429, 500, 502, 503, 504):
-                wait = 2 ** attempt
-                log.warning(
-                    "HTTP %s — backing off %ds (attempt %d/6)",
-                    resp.status_code, wait, attempt + 1,
-                )
-                time.sleep(wait)
-                continue
-            if not resp.ok:
-                log.error(
-                    "HTTP %s from %s\nResponse body: %s",
-                    resp.status_code, url, resp.text,
-                )
-            resp.raise_for_status()
-            return resp
-        raise RuntimeError(f"Request failed after 6 attempts: {method} {url}")
+        const cdnId = base.split('/').pop();
+        if (!cdnId || cdnId.length < 16 || seen.has(cdnId)) continue;
+        seen.add(cdnId);
 
-    def get(self, path: str, **kwargs):
-        return self._request("GET", f"{API_BASE}/{path}", **kwargs)
+        // Detect videos via aria-label or data attribute on the containing tile
+        const tile = a.closest('[data-latest-bg]') ||
+                     a.closest('[jsmodel]')         ||
+                     a.parentElement;
+        const tileLabel = tile ? (tile.getAttribute('aria-label') || '').toLowerCase() : '';
+        const isVideo = tileLabel.includes('video') ||
+                        !!(tile && tile.querySelector('[data-video-url]')) ||
+                        !!(tile && tile.querySelector('[aria-label*="ideo"]'));
 
-    def post(self, path: str, **kwargs):
-        return self._request("POST", f"{API_BASE}/{path}", **kwargs)
-
-    # -----------------------------------------------------------------------
-    # Listing helpers
-    # -----------------------------------------------------------------------
-
-    def list_media_items(self):
-        """Yield every media item in the authenticated user's library."""
-        page_token = None
-        while True:
-            params = {"pageSize": 100}
-            if page_token:
-                params["pageToken"] = page_token
-            data = self.get("mediaItems", params=params).json()
-            yield from data.get("mediaItems", [])
-            page_token = data.get("nextPageToken")
-            if not page_token:
-                break
-
-    def list_shared_albums(self):
-        """Yield every shared album visible to the authenticated user."""
-        page_token = None
-        while True:
-            params = {"pageSize": 50}
-            if page_token:
-                params["pageToken"] = page_token
-            data = self.get("sharedAlbums", params=params).json()
-            yield from data.get("sharedAlbums", [])
-            page_token = data.get("nextPageToken")
-            if not page_token:
-                break
-
-    def list_album_items(self, album_id: str):
-        """Yield every media item in the given album."""
-        page_token = None
-        while True:
-            body = {"albumId": album_id, "pageSize": 100}
-            if page_token:
-                body["pageToken"] = page_token
-            data = self.post("mediaItems:search", json=body).json()
-            yield from data.get("mediaItems", [])
-            page_token = data.get("nextPageToken")
-            if not page_token:
-                break
-
-    def get_media_item(self, item_id: str) -> dict:
-        """Fetch a fresh copy of a media item (baseUrl expires ~1 h)."""
-        return self.get(f"mediaItems/{item_id}").json()
+        results.push({ cdnId, base, isVideo, href: a.getAttribute('href') });
+    }
+    return results;
+}
+"""
 
 
-# ---------------------------------------------------------------------------
-# Download helpers
-# ---------------------------------------------------------------------------
+async def _extract_items(page: Page) -> list[dict]:
+    return await page.evaluate(_EXTRACT_JS)
 
-def _download_url(item: dict) -> str:
+
+async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str, dict]:
     """
-    Return the URL that produces the original-quality file.
-
-    Photos: baseUrl + "=d"   → original image bytes
-    Videos: baseUrl + "=dv"  → original video bytes (not a thumbnail)
+    Scroll to the bottom of the current page, collecting all visible media.
+    Stops when no new items appear for stable_rounds consecutive scrolls.
+    Returns a dict keyed by cdnId.
     """
-    base = item["baseUrl"]
-    if "video" in item.get("mediaMetadata", {}):
-        return base + "=dv"
-    return base + "=d"
+    seen: dict[str, dict] = {}
+    no_new = 0
+
+    await page.wait_for_load_state("domcontentloaded")
+
+    while no_new < stable_rounds:
+        items = await _extract_items(page)
+        added = sum(1 for it in items if it["cdnId"] not in seen)
+        for it in items:
+            seen.setdefault(it["cdnId"], it)
+
+        no_new = 0 if added else no_new + 1
+
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(1800)
+
+    return seen
 
 
-def _local_path(item: dict) -> Path:
-    """Return the target path under PHOTOS_DIR, organised YYYY/MM/filename."""
-    creation_time = item.get("mediaMetadata", {}).get("creationTime", "")
-    try:
-        dt = datetime.fromisoformat(creation_time.replace("Z", "+00:00"))
-        subfolder = dt.strftime("%Y/%m")
-    except (ValueError, AttributeError):
-        subfolder = "unknown"
+async def _shared_album_urls(page: Page) -> list[str]:
+    """Navigate to the sharing page and return URLs for all visible shared albums."""
+    await page.goto(SHARING_URL, wait_until="domcontentloaded", timeout=30_000)
+    await page.wait_for_timeout(2000)
 
-    filename = item.get("filename") or item["id"]
+    return await page.evaluate("""
+        () => [...new Set(
+            [...document.querySelectorAll('a[href*="/albums/"]')]
+            .map(a => a.href)
+            .filter(h => h.includes('photos.google.com'))
+        )]
+    """)
+
+
+# ---------------------------------------------------------------------------
+# Download
+# ---------------------------------------------------------------------------
+
+def _build_session(cookies: list[dict]) -> requests.Session:
+    """Build a requests.Session loaded with the browser's Google cookies."""
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        ),
+        # Referer is required — without it lh3.googleusercontent.com may return 403
+        "Referer": "https://photos.google.com/",
+    })
+    for c in cookies:
+        if "google" in c.get("domain", ""):
+            s.cookies.set(c["name"], c["value"], domain=c["domain"].lstrip("."))
+    return s
+
+
+def _ext_from_mime(content_type: str) -> str:
+    return MIME_TO_EXT.get(content_type.split(";")[0].strip().lower(), "")
+
+
+def _filename_from_cd(cd: str) -> str | None:
+    """Extract filename from a Content-Disposition header."""
+    m = re.search(r"filename\*=(?:UTF-8'')?([^\s;]+)", cd, re.I)
+    if m:
+        from urllib.parse import unquote
+        return unquote(m.group(1).strip('"'))
+    m = re.search(r'filename="?([^";]+)"?', cd, re.I)
+    return m.group(1).strip() if m else None
+
+
+def _dest_path(filename: str) -> Path:
+    """Place file under YYYY/MM inferred from filename, or 'unsorted'."""
+    m = re.search(r"(\d{4})(\d{2})\d{2}", filename)
+    subfolder = f"{m.group(1)}/{m.group(2)}" if m else "unsorted"
     return PHOTOS_DIR / subfolder / filename
 
 
-def _download_file(client: PhotosClient, item: dict, dest: Path) -> bool:
-    """
-    Stream the full-quality file to *dest*.
-    Returns True on success, False on permanent failure.
-    """
-    # Re-fetch to get a fresh baseUrl (they expire after ~1 hour)
-    fresh = client.get_media_item(item["id"])
-    url = _download_url(fresh)
+def download_item(
+    session: requests.Session,
+    item: dict,
+    state: dict,
+    *,
+    dry_run: bool = False,
+) -> bool:
+    """Download a single media item. Returns True if newly downloaded."""
+    cdn_id = item["cdnId"]
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    if cdn_id in state["downloaded"]:
+        existing = Path(state["downloaded"][cdn_id])
+        if existing.exists():
+            return False
+        log.info("Re-downloading (file missing): %s", cdn_id[:24])
+
+    if dry_run:
+        log.info("[DRY RUN] %s", cdn_id[:32])
+        return False
+
+    # Try the most likely suffix first; fall back to the other
+    suffixes = ("=dv", "=d") if item.get("isVideo") else ("=d", "=dv")
 
     for attempt in range(4):
-        try:
-            with client.session.get(url, stream=True, timeout=300) as resp:
-                resp.raise_for_status()
-                tmp = dest.with_suffix(dest.suffix + ".part")
-                with open(tmp, "wb") as fh:
-                    for chunk in resp.iter_content(chunk_size=65536):
-                        fh.write(chunk)
-                tmp.rename(dest)
-            return True
-        except Exception as exc:
-            if attempt == 3:
-                log.error("Failed to download %s: %s", item.get("filename"), exc)
-                if dest.with_suffix(dest.suffix + ".part").exists():
-                    dest.with_suffix(dest.suffix + ".part").unlink()
-                return False
-            wait = 2 ** attempt
-            log.warning("Download error (%s), retrying in %ds…", exc, wait)
-            time.sleep(wait)
+        for suffix in suffixes:
+            url = item["base"] + suffix
+            try:
+                with session.get(url, stream=True, timeout=300) as resp:
+                    if resp.status_code == 404:
+                        continue  # wrong suffix — try the other one
+                    resp.raise_for_status()
 
+                    ct = resp.headers.get("Content-Type", "")
+                    ext = _ext_from_mime(ct)
+                    fname = (
+                        _filename_from_cd(resp.headers.get("Content-Disposition", ""))
+                        or (cdn_id[:32] + ext)
+                    )
+
+                    dest = _dest_path(fname)
+                    if dest.exists() and cdn_id not in state["downloaded"]:
+                        dest = dest.with_stem(dest.stem + "_" + cdn_id[:8])
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+
+                    tmp = dest.with_suffix(dest.suffix + ".part")
+                    with open(tmp, "wb") as fh:
+                        for chunk in resp.iter_content(65536):
+                            fh.write(chunk)
+                    tmp.rename(dest)
+
+                    state["downloaded"][cdn_id] = str(dest)
+                    log.info("Downloaded: %s", dest.name)
+                    return True
+
+            except requests.RequestException as exc:
+                log.warning(
+                    "Download error (attempt %d, suffix %s): %s",
+                    attempt + 1, suffix, exc,
+                )
+                break  # retry outer loop with backoff
+
+        if attempt < 3:
+            time.sleep(2 ** attempt)
+
+    log.error("Failed to download %s after 4 attempts", cdn_id[:24])
     return False
 
 
 # ---------------------------------------------------------------------------
-# State persistence
+# State
 # ---------------------------------------------------------------------------
 
 def _load_state() -> dict:
@@ -277,100 +334,80 @@ def _save_state(state: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Core backup logic
+# Backup orchestration
 # ---------------------------------------------------------------------------
 
-def _process_item(
-    client: PhotosClient,
-    item: dict,
-    state: dict,
-    dry_run: bool,
-    counters: dict,
-) -> None:
-    item_id = item["id"]
-    filename = item.get("filename", item_id)
-
-    # Already downloaded and file still present?
-    if item_id in state["downloaded"]:
-        existing = Path(state["downloaded"][item_id])
-        if existing.exists():
-            log.debug("Skip (already downloaded): %s", filename)
-            counters["skipped"] += 1
-            return
-        log.info("Re-downloading (file missing): %s", filename)
-
-    dest = _local_path(item)
-
-    # Handle filename collisions with already-downloaded different items
-    if dest.exists() and item_id not in state["downloaded"]:
-        dest = dest.with_stem(f"{dest.stem}_{item_id[:8]}")
-
-    if dry_run:
-        log.info("[DRY RUN] %s → %s", filename, dest)
-        counters["skipped"] += 1
-        return
-
-    ok = _download_file(client, item, dest)
-    if ok:
-        state["downloaded"][item_id] = str(dest)
-        counters["downloaded"] += 1
-        if counters["downloaded"] % 25 == 0:
-            _save_state(state)
-            log.info(
-                "Progress — downloaded: %d, skipped: %d, errors: %d",
-                counters["downloaded"], counters["skipped"], counters["errors"],
-            )
-    else:
-        counters["errors"] += 1
-
-
-def backup(args: argparse.Namespace) -> None:
-    log.info("Authenticating with Google Photos…")
-    creds = authenticate()
-    client = PhotosClient(creds)
-
+async def do_backup(args: argparse.Namespace) -> None:
     state = _load_state()
-    counters = {"downloaded": 0, "skipped": 0, "errors": 0}
+    counts = {"downloaded": 0, "skipped": 0, "errors": 0}
 
-    def process(item):
-        try:
-            _process_item(client, item, state, args.dry_run, counters)
-        except Exception as exc:
+    async with async_playwright() as pw:
+        ctx = await _open_context(pw, headless=True)
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+
+        if not await _is_signed_in(page):
             log.error(
-                "Unexpected error for %s: %s", item.get("filename", item["id"]), exc
+                "Not signed in to Google Photos.\n"
+                "Run '--auth-only' on a machine with a display (or locally),\n"
+                "then copy %s to this server.",
+                BROWSER_DATA_DIR,
             )
-            counters["errors"] += 1
+            await ctx.close()
+            sys.exit(1)
 
-    # -----------------------------------------------------------------------
-    # Own library
-    # -----------------------------------------------------------------------
-    if not args.shared_only:
-        log.info("Scanning your library…")
-        for item in client.list_media_items():
-            process(item)
+        cookies = await ctx.cookies([
+            "https://photos.google.com",
+            "https://www.google.com",
+            "https://lh3.googleusercontent.com",
+        ])
+        session = _build_session(cookies)
 
-    # -----------------------------------------------------------------------
-    # Shared albums (albums shared *with* the authenticated user)
-    # -----------------------------------------------------------------------
-    if args.include_shared or args.shared_only:
-        log.info("Scanning shared albums…")
-        seen_album_ids: set[str] = set()
-        for album in client.list_shared_albums():
-            album_id = album["id"]
-            if album_id in seen_album_ids:
-                continue
-            seen_album_ids.add(album_id)
-            title = album.get("title", album_id)
-            log.info("  Album: %s", title)
-            for item in client.list_album_items(album_id):
+        def process(item: dict) -> None:
+            try:
+                ok = download_item(session, item, state, dry_run=args.dry_run)
+                counts["downloaded" if ok else "skipped"] += 1
+                n = counts["downloaded"]
+                if n and n % 25 == 0:
+                    _save_state(state)
+                    log.info(
+                        "Progress — downloaded: %d  skipped: %d  errors: %d",
+                        n, counts["skipped"], counts["errors"],
+                    )
+            except Exception as exc:
+                log.error("Error on %s: %s", item.get("cdnId", "?")[:24], exc)
+                counts["errors"] += 1
+
+        if not args.shared_only:
+            log.info("Scanning library…")
+            await page.goto(GPHOTOS_URL, wait_until="domcontentloaded")
+            items = await _scroll_and_collect(page)
+            log.info("Found %d items in library.", len(items))
+            for item in items.values():
                 process(item)
+
+        if args.include_shared or args.shared_only:
+            log.info("Scanning shared albums…")
+            album_urls = await _shared_album_urls(page)
+            log.info("Found %d shared albums.", len(album_urls))
+            for url in album_urls:
+                log.info("  Album: %s", url)
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                    items = await _scroll_and_collect(page)
+                    log.info("  Found %d items.", len(items))
+                    for item in items.values():
+                        process(item)
+                except Exception as exc:
+                    log.error("Error scanning album %s: %s", url, exc)
+
+        await ctx.close()
 
     _save_state(state)
     log.info(
-        "Done — downloaded: %d, skipped: %d, errors: %d",
-        counters["downloaded"], counters["skipped"], counters["errors"],
+        "Done — downloaded: %d  skipped: %d  errors: %d",
+        counts["downloaded"], counts["skipped"], counts["errors"],
     )
-    if counters["errors"]:
+    if counts["errors"]:
         sys.exit(1)
 
 
@@ -380,64 +417,44 @@ def backup(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Back up full-quality photos and videos from Google Photos.",
+        description="Back up Google Photos via browser automation — no Photos Library API required.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # First-time auth (map port 8080 so the OAuth redirect reaches the container)
-  docker run --rm -p 8080:8080 -v ./config:/config gphotos-backup --auth-only
+Auth (once — requires a display):
+  docker compose run --rm gphotos-auth            # on a local machine with X11
 
-  # Backup your own library
-  docker run --rm -v ./config:/config -v ./data:/data gphotos-backup
+  Or auth locally and copy the session to your server:
+  rsync -av ./config/browser-data/ user@server:/path/to/config/browser-data/
 
-  # Backup your library AND all albums shared with you
-  docker run --rm -v ./config:/config -v ./data:/data gphotos-backup --include-shared
-
-  # Backup only shared albums
-  docker run --rm -v ./config:/config -v ./data:/data gphotos-backup --shared-only
+Backup (headless — runs anywhere after auth):
+  docker compose run --rm gphotos-backup
+  docker compose run --rm gphotos-backup --include-shared
+  docker compose run --rm gphotos-backup --shared-only --dry-run
 """,
     )
     parser.add_argument(
-        "--auth-only",
-        action="store_true",
-        help="Authenticate and save token, then exit (no download). "
-             "Requires -p 8080:8080.",
+        "--auth-only", action="store_true",
+        help="Open a headed browser to sign in and save the session, then exit.",
     )
-    parser.add_argument(
-        "--include-shared",
-        action="store_true",
-        help="Also download from albums shared with you.",
-    )
-    parser.add_argument(
-        "--shared-only",
-        action="store_true",
-        help="Only download from albums shared with you (skip own library).",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="List what would be downloaded without actually downloading.",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable verbose debug logging.",
-    )
+    parser.add_argument("--include-shared", action="store_true",
+                        help="Also download albums shared with you.")
+    parser.add_argument("--shared-only", action="store_true",
+                        help="Only download albums shared with you.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="List what would be downloaded without downloading.")
+    parser.add_argument("--debug", action="store_true",
+                        help="Enable verbose debug logging.")
     args = parser.parse_args()
 
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
-
     if args.include_shared and args.shared_only:
         parser.error("--include-shared and --shared-only are mutually exclusive.")
 
     if args.auth_only:
-        log.info("Authenticating…")
-        authenticate()
-        log.info("Authentication complete.")
-        return
-
-    backup(args)
+        asyncio.run(do_auth())
+    else:
+        asyncio.run(do_backup(args))
 
 
 if __name__ == "__main__":
