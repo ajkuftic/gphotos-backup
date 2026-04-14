@@ -107,34 +107,43 @@ async def do_auth() -> None:
         ctx = await _open_context(pw, headless=False)
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
-        # Use networkidle so JS-driven redirects (e.g. to accounts.google.com)
-        # have fully fired before we inspect the URL.
-        try:
-            await page.goto(GPHOTOS_URL, wait_until="networkidle", timeout=30_000)
-        except Exception:
-            pass  # timeout is fine — we just need navigation to start
+        # Start navigation — don't await networkidle; Google's JS redirect fires
+        # asynchronously so we can't rely on a single wait_until value.
+        await page.goto(GPHOTOS_URL, wait_until="domcontentloaded", timeout=30_000)
+
+        # Give Google's JS a moment to trigger the sign-in redirect before we
+        # start inspecting the URL, so we don't read "photos.google.com" before
+        # the redirect has fired.
+        await page.wait_for_timeout(3000)
 
         log.info("Please sign in to Google in the browser window (5-minute timeout)…")
 
-        # Poll until the URL settles on the Google Photos library (not a login page).
-        for _ in range(300):  # up to 5 minutes, 1-second intervals
-            url = page.url
-            if (
-                "photos.google.com" in url
-                and "accounts.google.com" not in url
-                and "myaccount.google.com" not in url
-                and "signin" not in url.lower()
-                and "challenge" not in url.lower()
-                and "oauth" not in url.lower()
-            ):
-                break
-            await asyncio.sleep(1)
-        else:
+        # Wait until we land on the signed-in Google Photos library.
+        # We look for the main photo grid element rather than just the URL so we
+        # know the page is fully ready (not just mid-redirect).
+        try:
+            await page.wait_for_function(
+                """() => {
+                    const url = location.href;
+                    if (!url.includes('photos.google.com')) return false;
+                    if (url.includes('accounts.google.com')) return false;
+                    if (/signin|challenge|oauth|ServiceLogin/i.test(url)) return false;
+                    // Confirm library content is present (photo grid or empty-state msg)
+                    return !!(
+                        document.querySelector('a[href*="/photo/"]') ||
+                        document.querySelector('c-wiz[data-p]') ||
+                        document.querySelector('[data-latest-bg]') ||
+                        document.querySelector('[jscontroller][class*="photo"]')
+                    );
+                }""",
+                timeout=300_000,  # 5 minutes
+            )
+        except Exception:
             log.error("Sign-in timed out.")
             await ctx.close()
             sys.exit(1)
 
-        await asyncio.sleep(2)  # let session cookies settle after redirect
+        await asyncio.sleep(2)  # let session cookies settle
         log.info("Signed in — session saved to %s", BROWSER_DATA_DIR)
         await ctx.close()
 
