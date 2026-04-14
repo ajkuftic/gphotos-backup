@@ -160,12 +160,33 @@ _EXTRACT_JS = """
     const seen = new Set();
 
     for (const a of document.querySelectorAll('a[href*="/photo/"]')) {
-        const img = a.querySelector('img[src*="lh3.googleusercontent.com"]');
-        if (!img || !img.src) continue;
+        // Google Photos lazy-loads thumbnails — try every plausible source attribute
+        // as well as the tile's data-latest-bg background-image attribute.
+        let base = null;
 
-        // Strip resolution/format suffix — everything from '=' to end
-        const base = img.src.replace(/=[^/]*$/, '');
-        if (!base.includes('lh3.googleusercontent.com')) continue;
+        const img = a.querySelector('img');
+        if (img) {
+            const src = img.src
+                     || img.getAttribute('data-src')
+                     || img.getAttribute('data-iml')
+                     || '';
+            if (src.includes('lh3.googleusercontent.com')) {
+                base = src.replace(/=[^/]*$/, '');
+            }
+        }
+
+        // Fallback: background CDN URL on the tile element
+        if (!base) {
+            const tile = a.closest('[data-latest-bg]');
+            if (tile) {
+                const bg = tile.getAttribute('data-latest-bg') || '';
+                if (bg.includes('lh3.googleusercontent.com')) {
+                    base = bg.replace(/=[^/]*$/, '');
+                }
+            }
+        }
+
+        if (!base || !base.includes('lh3.googleusercontent.com')) continue;
 
         const cdnId = base.split('/').pop();
         if (!cdnId || cdnId.length < 16 || seen.has(cdnId)) continue;
@@ -201,6 +222,15 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
     no_new = 0
 
     await page.wait_for_load_state("domcontentloaded")
+
+    # Wait for the Google Photos JS app to render at least one photo tile
+    # before we start scrolling; domcontentloaded fires before React renders.
+    try:
+        await page.wait_for_selector(
+            'a[href*="/photo/"]', state="attached", timeout=20_000
+        )
+    except Exception:
+        log.debug("No photo links appeared within 20 s — page may be empty.")
 
     while no_new < stable_rounds:
         items = await _extract_items(page)
