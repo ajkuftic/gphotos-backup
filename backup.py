@@ -106,17 +106,35 @@ async def do_auth() -> None:
     async with async_playwright() as pw:
         ctx = await _open_context(pw, headless=False)
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-        await page.goto(GPHOTOS_URL)
 
-        if not await _is_signed_in(page):
-            log.info("Please sign in to Google in the browser window (5-minute timeout)…")
-            try:
-                await page.wait_for_url(f"{GPHOTOS_URL}/**", timeout=300_000)
-            except Exception:
-                log.error("Sign-in timed out.")
-                await ctx.close()
-                sys.exit(1)
+        # Use networkidle so JS-driven redirects (e.g. to accounts.google.com)
+        # have fully fired before we inspect the URL.
+        try:
+            await page.goto(GPHOTOS_URL, wait_until="networkidle", timeout=30_000)
+        except Exception:
+            pass  # timeout is fine — we just need navigation to start
 
+        log.info("Please sign in to Google in the browser window (5-minute timeout)…")
+
+        # Poll until the URL settles on the Google Photos library (not a login page).
+        for _ in range(300):  # up to 5 minutes, 1-second intervals
+            url = page.url
+            if (
+                "photos.google.com" in url
+                and "accounts.google.com" not in url
+                and "myaccount.google.com" not in url
+                and "signin" not in url.lower()
+                and "challenge" not in url.lower()
+                and "oauth" not in url.lower()
+            ):
+                break
+            await asyncio.sleep(1)
+        else:
+            log.error("Sign-in timed out.")
+            await ctx.close()
+            sys.exit(1)
+
+        await asyncio.sleep(2)  # let session cookies settle after redirect
         log.info("Signed in — session saved to %s", BROWSER_DATA_DIR)
         await ctx.close()
 
