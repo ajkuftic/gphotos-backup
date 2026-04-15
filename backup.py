@@ -256,6 +256,12 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
             dataLatestBg:document.querySelectorAll('[data-latest-bg]').length,
             sampleHrefs: [...document.querySelectorAll('a[href]')]
                             .slice(0, 10).map(a => a.href),
+            sampleBgValues: [...document.querySelectorAll('[data-latest-bg]')]
+                            .slice(0, 3).map(el => el.getAttribute('data-latest-bg')),
+            firstPhotoTileHTML: (() => {
+                const a = document.querySelector('a[href*=\\"/photo/\\"]');
+                return a ? a.parentElement.outerHTML.slice(0, 500) : null;
+            })(),
         })""")
         log.debug("URL: %s", url)
         log.debug("Title: %s", title)
