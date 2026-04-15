@@ -54,7 +54,9 @@ docker compose run --rm gphotos-auth
 > ```
 > You'll need XQuartz (macOS) or VcXsrv (Windows) running.
 
-The session is saved to `config/browser-data/`.
+The session is saved to `config/browser-data/` and `config/session.json`.
+
+> `session.json` is a portable, cross-platform export of your Google session cookies. It is what the backup container actually uses, so it is the critical file to copy.
 
 ### Authenticating for a remote server (NAS)
 
@@ -64,8 +66,8 @@ Run auth on your local machine, then copy the session:
 # On your local machine
 docker compose run --rm gphotos-auth
 
-# Copy to the remote server
-rsync -av ./config/browser-data/ user@your-nas:/path/to/gphotos-backup/config/browser-data/
+# Copy to the remote server (only session.json is strictly required)
+rsync -av ./config/session.json user@your-nas:/path/to/gphotos-backup/config/session.json
 ```
 
 After that, all backup runs on the server are fully headless — no display needed.

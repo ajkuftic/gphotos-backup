@@ -27,6 +27,7 @@ from playwright.async_api import async_playwright, BrowserContext, Page
 CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", "/config"))
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 BROWSER_DATA_DIR = CONFIG_DIR / "browser-data"
+SESSION_FILE = CONFIG_DIR / "session.json"   # portable cross-platform session
 STATE_FILE = DATA_DIR / "backup_state.json"
 PHOTOS_DIR = DATA_DIR / "photos"
 
@@ -150,7 +151,12 @@ async def do_auth() -> None:
             sys.exit(1)
 
         await asyncio.sleep(2)  # let session cookies settle
-        log.info("Signed in — session saved to %s", BROWSER_DATA_DIR)
+
+        # Export session as portable JSON so it can be transferred cross-platform
+        # (macOS Keychain-encrypted cookies in browser-data/ can't be read on Linux).
+        SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        await ctx.storage_state(path=str(SESSION_FILE))
+        log.info("Signed in — session saved to %s and %s", BROWSER_DATA_DIR, SESSION_FILE)
         await ctx.close()
 
 
@@ -425,17 +431,34 @@ async def do_backup(args: argparse.Namespace) -> None:
     counts = {"downloaded": 0, "skipped": 0, "errors": 0}
 
     async with async_playwright() as pw:
-        ctx = await _open_context(pw, headless=True)
+        # Prefer the portable session.json (cross-platform: works when auth was
+        # run on macOS and backup runs on Linux, since macOS Keychain-encrypted
+        # cookies in browser-data/ cannot be decrypted on Linux).
+        _browser = None
+        if SESSION_FILE.exists():
+            log.debug("Loading portable session from %s", SESSION_FILE)
+            _browser = await pw.chromium.launch(headless=True, args=_CHROMIUM_ARGS)
+            ctx = await _browser.new_context(
+                storage_state=str(SESSION_FILE),
+                viewport={"width": 1280, "height": 900},
+                accept_downloads=True,
+            )
+        else:
+            log.debug("No session.json found; falling back to browser-data profile.")
+            ctx = await _open_context(pw, headless=True)
+
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
         if not await _is_signed_in(page):
             log.error(
                 "Not signed in to Google Photos.\n"
                 "Run '--auth-only' on a machine with a display (or locally),\n"
-                "then copy %s to this server.",
-                BROWSER_DATA_DIR,
+                "then copy %s and %s to this server.",
+                BROWSER_DATA_DIR, SESSION_FILE,
             )
             await ctx.close()
+            if _browser:
+                await _browser.close()
             sys.exit(1)
 
         cookies = await ctx.cookies([
@@ -484,6 +507,8 @@ async def do_backup(args: argparse.Namespace) -> None:
                     log.error("Error scanning album %s: %s", url, exc)
 
         await ctx.close()
+        if _browser:
+            await _browser.close()
 
     _save_state(state)
     log.info(
