@@ -176,29 +176,36 @@ _EXTRACT_JS = """
         // as well as the tile's data-latest-bg background-image attribute.
         let base = null;
 
+        // Google Photos uses several CDN domains depending on account/region:
+        //   lh3.googleusercontent.com  (legacy)
+        //   photos.fife.usercontent.google.com  (current)
+        // Accept any URL that contains either pattern.
+        const isCdnUrl = u => u.includes('googleusercontent.com') ||
+                               u.includes('usercontent.google.com');
+
         const img = a.querySelector('img');
         if (img) {
             const src = img.src
                      || img.getAttribute('data-src')
                      || img.getAttribute('data-iml')
                      || '';
-            if (src.includes('lh3.googleusercontent.com')) {
+            if (isCdnUrl(src)) {
                 base = src.replace(/=[^/]*$/, '');
             }
         }
 
-        // Fallback: background CDN URL on the tile element
+        // Fallback: background CDN URL on the tile element (data-latest-bg)
         if (!base) {
             const tile = a.closest('[data-latest-bg]');
             if (tile) {
                 const bg = tile.getAttribute('data-latest-bg') || '';
-                if (bg.includes('lh3.googleusercontent.com')) {
+                if (isCdnUrl(bg)) {
                     base = bg.replace(/=[^/]*$/, '');
                 }
             }
         }
 
-        if (!base || !base.includes('lh3.googleusercontent.com')) continue;
+        if (!base || !isCdnUrl(base)) continue;
 
         const cdnId = base.split('/').pop();
         if (!cdnId || cdnId.length < 16 || seen.has(cdnId)) continue;
@@ -252,7 +259,7 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
             albumLinks:  document.querySelectorAll('a[href*=\\"/albums/\\"]').length,
             allAnchors:  document.querySelectorAll('a[href]').length,
             allImgs:     document.querySelectorAll('img').length,
-            lh3Imgs:     document.querySelectorAll('img[src*=\\"lh3\\"]').length,
+            cdnImgs:     document.querySelectorAll('img[src*=\\"googleusercontent\\"]').length,
             dataLatestBg:document.querySelectorAll('[data-latest-bg]').length,
             sampleHrefs: [...document.querySelectorAll('a[href]')]
                             .slice(0, 10).map(a => a.href),
@@ -471,6 +478,7 @@ async def do_backup(args: argparse.Namespace) -> None:
             "https://photos.google.com",
             "https://www.google.com",
             "https://lh3.googleusercontent.com",
+            "https://photos.fife.usercontent.google.com",
         ])
         session = _build_session(cookies)
 
