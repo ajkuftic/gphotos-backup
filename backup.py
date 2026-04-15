@@ -194,7 +194,20 @@ _EXTRACT_JS = """
             }
         }
 
-        // Fallback: background CDN URL on the tile element (data-latest-bg)
+        // Fallback 1: inline background-image style on a child element inside <a>
+        // (e.g. <div class="RY3tic" style="background-image: url('...')">)
+        if (!base) {
+            const inner = a.querySelector('[style*="background-image"]');
+            if (inner) {
+                const styleVal = inner.getAttribute('style') || '';
+                const m = styleVal.match(/url\(["']?(https?:\/\/[^"')]+)/);
+                if (m && isCdnUrl(m[1])) {
+                    base = m[1].replace(/=[^/]*$/, '');
+                }
+            }
+        }
+
+        // Fallback 2: data-latest-bg on an ancestor element
         if (!base) {
             const tile = a.closest('[data-latest-bg]');
             if (tile) {
@@ -267,12 +280,41 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
                             .slice(0, 3).map(el => el.getAttribute('data-latest-bg')),
             firstPhotoTileHTML: (() => {
                 const a = document.querySelector('a[href*=\\"/photo/\\"]');
-                return a ? a.parentElement.outerHTML.slice(0, 500) : null;
+                return a ? a.parentElement.outerHTML.slice(0, 1000) : null;
             })(),
         })""")
         log.debug("URL: %s", url)
         log.debug("Title: %s", title)
         log.debug("DOM counts: %s", counts)
+
+        extract_diag = await page.evaluate("""() => {
+            const isCdnUrl = u => u.includes('googleusercontent.com') ||
+                                   u.includes('usercontent.google.com');
+            const out = [];
+            let n = 0;
+            for (const a of document.querySelectorAll('a[href*="/photo/"]')) {
+                if (n++ >= 3) break;
+                const img = a.querySelector('img');
+                const imgSrc = img ? (img.src || img.getAttribute('data-src') || '') : '';
+                const tile = a.closest('[data-latest-bg]');
+                const bg   = tile ? (tile.getAttribute('data-latest-bg') || '') : '';
+                const inner = a.querySelector('[style*="background-image"]');
+                const innerStyle = inner ? (inner.getAttribute('style') || '') : '';
+                const styleMatch = innerStyle.match(/url\\(["']?(https?:\\/\\/[^"')]+)/);
+                out.push({
+                    href:         a.getAttribute('href'),
+                    hasTile:      !!tile,
+                    bgIsCdn:      isCdnUrl(bg),
+                    hasInner:     !!inner,
+                    innerStyleSlice: innerStyle.slice(0, 120),
+                    styleMatchUrl:   styleMatch ? styleMatch[1].slice(0, 80) : null,
+                    imgSrcIsCdn:  isCdnUrl(imgSrc),
+                });
+            }
+            return out;
+        }""")
+        log.debug("Extraction diagnostic: %s", extract_diag)
+
         screenshot_path = DATA_DIR / "debug_screenshot.png"
         await page.screenshot(path=str(screenshot_path), full_page=False)
         log.debug("Screenshot saved to %s", screenshot_path)
