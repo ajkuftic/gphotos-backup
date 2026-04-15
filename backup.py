@@ -224,14 +224,11 @@ _EXTRACT_JS = """
         if (!cdnId || cdnId.length < 16 || seen.has(cdnId)) continue;
         seen.add(cdnId);
 
-        // Detect videos via aria-label or data attribute on the containing tile
-        const tile = a.closest('[data-latest-bg]') ||
-                     a.closest('[jsmodel]')         ||
-                     a.parentElement;
-        const tileLabel = tile ? (tile.getAttribute('aria-label') || '').toLowerCase() : '';
-        const isVideo = tileLabel.includes('video') ||
-                        !!(tile && tile.querySelector('[data-video-url]')) ||
-                        !!(tile && tile.querySelector('[aria-label*="ideo"]'));
+        // Detect videos via the anchor's own aria-label ("Video - 0:20 - ...")
+        // which is more reliable than inspecting the parent tile element.
+        const ariaLabel = (a.getAttribute('aria-label') || '').toLowerCase();
+        const isVideo = ariaLabel.startsWith('video') ||
+                        !!(a.querySelector('[data-video-url]'));
 
         results.push({ cdnId, base, isVideo, href: a.getAttribute('href') });
     }
@@ -327,8 +324,13 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
 
         no_new = 0 if added else no_new + 1
 
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await page.wait_for_timeout(1800)
+        # Google Photos uses a virtual scroll — try both the window and the
+        # html/body element to ensure the infinite-scroll handler fires.
+        await page.evaluate("""
+            window.scrollTo(0, document.body.scrollHeight);
+            document.documentElement.scrollTop = document.documentElement.scrollHeight;
+        """)
+        await page.wait_for_timeout(2500)
 
     return seen
 
