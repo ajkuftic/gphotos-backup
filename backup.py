@@ -324,12 +324,10 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
 
         no_new = 0 if added else no_new + 1
 
-        # Google Photos uses a virtual scroll — try both the window and the
-        # html/body element to ensure the infinite-scroll handler fires.
-        await page.evaluate("""
-            window.scrollTo(0, document.body.scrollHeight);
-            document.documentElement.scrollTop = document.documentElement.scrollHeight;
-        """)
+        # Scroll one viewport at a time so new tiles enter the viewport and
+        # get their background-image style set (Google Photos only renders
+        # the CDN URL for tiles that are actually visible on screen).
+        await page.evaluate("window.scrollBy(0, window.innerHeight)")
         await page.wait_for_timeout(2500)
 
     return seen
