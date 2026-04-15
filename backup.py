@@ -232,6 +232,26 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
     except Exception:
         log.debug("No photo links appeared within 20 s — page may be empty.")
 
+    if log.isEnabledFor(logging.DEBUG):
+        url = page.url
+        title = await page.title()
+        counts = await page.evaluate("""() => ({
+            photoLinks:  document.querySelectorAll('a[href*=\\"/photo/\\"]').length,
+            albumLinks:  document.querySelectorAll('a[href*=\\"/albums/\\"]').length,
+            allAnchors:  document.querySelectorAll('a[href]').length,
+            allImgs:     document.querySelectorAll('img').length,
+            lh3Imgs:     document.querySelectorAll('img[src*=\\"lh3\\"]').length,
+            dataLatestBg:document.querySelectorAll('[data-latest-bg]').length,
+            sampleHrefs: [...document.querySelectorAll('a[href]')]
+                            .slice(0, 10).map(a => a.href),
+        })""")
+        log.debug("URL: %s", url)
+        log.debug("Title: %s", title)
+        log.debug("DOM counts: %s", counts)
+        screenshot_path = DATA_DIR / "debug_screenshot.png"
+        await page.screenshot(path=str(screenshot_path), full_page=False)
+        log.debug("Screenshot saved to %s", screenshot_path)
+
     while no_new < stable_rounds:
         items = await _extract_items(page)
         added = sum(1 for it in items if it["cdnId"] not in seen)
