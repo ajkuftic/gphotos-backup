@@ -317,6 +317,13 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
         log.debug("Screenshot saved to %s", screenshot_path)
 
     while no_new < stable_rounds:
+        if log.isEnabledFor(logging.DEBUG):
+            dom_count = await page.evaluate(
+                "document.querySelectorAll('a[href*=\"/photo/\"]').length"
+            )
+            log.debug("Scroll iter %d: %d photo links in DOM, %d collected so far",
+                      no_new, dom_count, len(seen))
+
         items = await _extract_items(page)
         added = sum(1 for it in items if it["cdnId"] not in seen)
         for it in items:
@@ -324,10 +331,9 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
 
         no_new = 0 if added else no_new + 1
 
-        # Scroll one viewport at a time so new tiles enter the viewport and
-        # get their background-image style set (Google Photos only renders
-        # the CDN URL for tiles that are actually visible on screen).
-        await page.evaluate("window.scrollBy(0, window.innerHeight)")
+        # Use mouse wheel to simulate a real user scroll — window.scrollBy does
+        # not reliably trigger Google Photos' virtual-scroll handler.
+        await page.mouse.wheel(0, 5000)
         await page.wait_for_timeout(2500)
 
     return seen
