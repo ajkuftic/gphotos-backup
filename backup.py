@@ -77,9 +77,15 @@ async def _open_context(pw, *, headless: bool) -> BrowserContext:
 async def _is_signed_in(page: Page) -> bool:
     """Navigate to Google Photos and return True if already signed in."""
     await page.goto(GPHOTOS_URL, wait_until="domcontentloaded", timeout=30_000)
+    # Wait briefly for any JS redirect to fire before checking the final URL.
+    await page.wait_for_timeout(3000)
     url = page.url
+    # Must be on the actual library host, not the marketing/about site or login page.
     return (
-        "accounts.google.com" not in url
+        url.startswith("https://photos.google.com")
+        and "/about" not in url
+        and "/login" not in url
+        and "accounts.google.com" not in url
         and "ServiceLogin" not in url
         and "signin" not in url.lower()
     )
