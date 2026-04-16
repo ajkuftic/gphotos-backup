@@ -316,9 +316,10 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
         await page.screenshot(path=str(screenshot_path), full_page=False)
         log.debug("Screenshot saved to %s", screenshot_path)
 
-    # Click the page body to ensure it has keyboard focus before scrolling.
+    # Click far top-left corner (nav bar area) to give the page focus without
+    # accidentally clicking on a photo tile.
     try:
-        await page.click("body", timeout=3000)
+        await page.click("body", position={"x": 50, "y": 10}, timeout=3000)
     except Exception:
         pass
 
@@ -337,20 +338,14 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
 
         no_new = 0 if added else no_new + 1
 
-        # Move focus away from photo grid, then scroll with smaller increments.
-        await page.evaluate("document.body.focus()")
-        await page.wait_for_timeout(300)  # Ensure focus is set before scroll
-
-        # Scroll by a smaller amount (1000px) to avoid triggering photo selection.
-        await page.evaluate("""
-            const all = [...document.querySelectorAll('*')];
-            const scroller = all.find(
-                el => el.scrollHeight > el.clientHeight + 50 &&
-                      ['auto','scroll','overlay'].includes(getComputedStyle(el).overflowY)
-            );
-            if (scroller) scroller.scrollTop += 1000;
-            window.scrollTo(0, window.scrollY + 1000);
-        """)
+        # Scroll by moving the last visible tile into view. Playwright handles
+        # container detection; this also triggers Google Photos' virtual-scroll
+        # IntersectionObserver which loads the next batch of tiles.
+        last_tile = page.locator('a[href*="/photo/"]').last()
+        try:
+            await last_tile.scroll_into_view_if_needed(timeout=3000)
+        except Exception:
+            await page.mouse.wheel(0, 2000)
         await page.wait_for_timeout(2500)
 
         if log.isEnabledFor(logging.DEBUG):
