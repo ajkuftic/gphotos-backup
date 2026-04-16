@@ -316,6 +316,12 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
         await page.screenshot(path=str(screenshot_path), full_page=False)
         log.debug("Screenshot saved to %s", screenshot_path)
 
+    # Click the page body to ensure it has keyboard focus before scrolling.
+    try:
+        await page.click("body", timeout=3000)
+    except Exception:
+        pass
+
     while no_new < stable_rounds:
         if log.isEnabledFor(logging.DEBUG):
             dom_count = await page.evaluate(
@@ -331,9 +337,23 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
 
         no_new = 0 if added else no_new + 1
 
-        # Use mouse wheel to simulate a real user scroll — window.scrollBy does
-        # not reliably trigger Google Photos' virtual-scroll handler.
-        await page.mouse.wheel(0, 5000)
+        # Try multiple scroll strategies; Google Photos' virtual-scroll handler
+        # only fires when the right element receives a scroll/wheel event.
+        await page.evaluate("""
+            // 1. Scroll the deepest overflowing element
+            const all = [...document.querySelectorAll('*')];
+            const scroller = all.find(
+                el => el.scrollHeight > el.clientHeight + 50 &&
+                      ['auto','scroll','overlay'].includes(getComputedStyle(el).overflowY)
+            );
+            if (scroller) scroller.scrollTop += 4000;
+
+            // 2. Always also scroll the document
+            window.scrollBy(0, 4000);
+            document.documentElement.scrollTop += 4000;
+        """)
+        # Keyboard End in case neither JS scroll triggered the handler
+        await page.keyboard.press("End")
         await page.wait_for_timeout(2500)
 
     return seen
