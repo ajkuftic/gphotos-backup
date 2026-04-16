@@ -166,7 +166,7 @@ async def do_auth() -> None:
 
 # JavaScript injected into the page to extract visible media items.
 # Returns [{cdnId, base, isVideo, href}] for every photo/video anchor found.
-_EXTRACT_JS = """
+_EXTRACT_JS = r"""
 () => {
     const results = [];
     const seen = new Set();
