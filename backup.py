@@ -337,19 +337,9 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
 
         no_new = 0 if added else no_new + 1
 
-        # Scroll by one viewport height — smaller increments let virtual scroll
-        # keep up and properly render background-image on newly-visible tiles.
-        await page.evaluate("""
-            const all = [...document.querySelectorAll('*')];
-            const scroller = all.find(
-                el => el.scrollHeight > el.clientHeight + 50 &&
-                      ['auto','scroll','overlay'].includes(getComputedStyle(el).overflowY)
-            );
-            if (scroller) {
-                scroller.scrollTop += window.innerHeight;
-            }
-            window.scrollBy(0, window.innerHeight);
-        """)
+        # Trigger scroll via mouse wheel — more reliable than direct scroll manipulation
+        # for triggering Google Photos' virtual-scroll handler.
+        await page.mouse.wheel(0, 2000)
         await page.wait_for_timeout(2000)
 
     return seen
