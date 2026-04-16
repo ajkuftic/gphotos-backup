@@ -337,31 +337,20 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
 
         no_new = 0 if added else no_new + 1
 
-        # Scroll the element with the largest scrollHeight — Google Photos uses a
-        # virtual-scroll container that isn't always the first overflowing element.
-        # We also scroll the document root as a fallback.
-        # NOTE: Do NOT use page.keyboard.press("End") — Google Photos intercepts the
-        # End key as a navigation shortcut and navigates away from the library page.
+        # Scroll by one viewport height — smaller increments let virtual scroll
+        # keep up and properly render background-image on newly-visible tiles.
         await page.evaluate("""
-            // Find the element with the largest scrollHeight among all scrollable elements
-            let maxScrollHeight = 0;
-            let scroller = null;
-            for (const el of document.querySelectorAll('*')) {
-                const style = getComputedStyle(el);
-                if (['auto', 'scroll', 'overlay'].includes(style.overflowY) &&
-                        el.scrollHeight > el.clientHeight + 50 &&
-                        el.scrollHeight > maxScrollHeight) {
-                    maxScrollHeight = el.scrollHeight;
-                    scroller = el;
-                }
+            const all = [...document.querySelectorAll('*')];
+            const scroller = all.find(
+                el => el.scrollHeight > el.clientHeight + 50 &&
+                      ['auto','scroll','overlay'].includes(getComputedStyle(el).overflowY)
+            );
+            if (scroller) {
+                scroller.scrollTop += window.innerHeight;
             }
-            if (scroller) scroller.scrollTop += 4000;
-
-            // Also scroll the document root as a fallback
-            window.scrollBy(0, 4000);
-            document.documentElement.scrollTop += 4000;
+            window.scrollBy(0, window.innerHeight);
         """)
-        await page.wait_for_timeout(2500)
+        await page.wait_for_timeout(2000)
 
     return seen
 
