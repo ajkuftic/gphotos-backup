@@ -337,22 +337,19 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
 
         no_new = 0 if added else no_new + 1
 
-        # Move focus to the search bar so scrolling doesn't interact with photo grid items.
+        # Move focus away from photo grid, then scroll with smaller increments.
+        await page.evaluate("document.body.focus()")
+        await page.wait_for_timeout(300)  # Ensure focus is set before scroll
+
+        # Scroll by a smaller amount (1000px) to avoid triggering photo selection.
         await page.evaluate("""
-            const searchInput = document.querySelector('input[aria-label*="Search"]') ||
-                                document.querySelector('input[placeholder*="Search"]');
-            if (searchInput) searchInput.focus();
-            else document.body.focus();
-        """)
-        # Scroll the page
-        await page.evaluate("""
-            window.scrollBy(0, 3000);
             const all = [...document.querySelectorAll('*')];
             const scroller = all.find(
                 el => el.scrollHeight > el.clientHeight + 50 &&
                       ['auto','scroll','overlay'].includes(getComputedStyle(el).overflowY)
             );
-            if (scroller) scroller.scrollTop += 3000;
+            if (scroller) scroller.scrollTop += 1000;
+            window.scrollTo(0, window.scrollY + 1000);
         """)
         await page.wait_for_timeout(2500)
 
