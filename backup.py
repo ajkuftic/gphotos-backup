@@ -337,9 +337,14 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
 
         no_new = 0 if added else no_new + 1
 
-        # Scroll the page via JavaScript. PageDown/End open the photo viewer if a
-        # grid item has focus, so we blur first to prevent that interaction.
-        await page.evaluate("document.activeElement?.blur()")
+        # Move focus to the search bar so scrolling doesn't interact with photo grid items.
+        await page.evaluate("""
+            const searchInput = document.querySelector('input[aria-label*="Search"]') ||
+                                document.querySelector('input[placeholder*="Search"]');
+            if (searchInput) searchInput.focus();
+            else document.body.focus();
+        """)
+        # Scroll the page
         await page.evaluate("""
             window.scrollBy(0, 3000);
             const all = [...document.querySelectorAll('*')];
