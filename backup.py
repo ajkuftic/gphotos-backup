@@ -241,7 +241,7 @@ async def _extract_items(page: Page) -> list[dict]:
     return await page.evaluate(_EXTRACT_JS)
 
 
-async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str, dict]:
+async def _scroll_and_collect(page: Page, *, stable_rounds: int = 10) -> dict[str, dict]:
     """
     Scroll to the bottom of the current page, collecting all visible media.
     Stops when no new items appear for stable_rounds consecutive scrolls.
@@ -323,37 +323,76 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
     except Exception:
         pass
 
-    while no_new < stable_rounds:
+    scroll_attempt = 0
+    while no_new < stable_rounds and scroll_attempt < 100:
+        scroll_attempt += 1
+
         if log.isEnabledFor(logging.DEBUG):
             dom_count = await page.evaluate(
                 "document.querySelectorAll('a[href*=\"/photo/\"]').length"
             )
             log.debug("Scroll iter %d: %d photo links in DOM, %d collected so far",
-                      no_new, dom_count, len(seen))
+                      scroll_attempt, dom_count, len(seen))
 
         items = await _extract_items(page)
         added = sum(1 for it in items if it["cdnId"] not in seen)
         for it in items:
             seen.setdefault(it["cdnId"], it)
 
-        no_new = 0 if added else no_new + 1
+        if added:
+            no_new = 0
+            log.debug("Found %d new items in iteration %d", added, scroll_attempt)
+        else:
+            no_new += 1
 
-        # Scroll by moving the last visible tile into view. Playwright handles
-        # container detection; this also triggers Google Photos' virtual-scroll
-        # IntersectionObserver which loads the next batch of tiles.
-        last_tile = page.locator('a[href*="/photo/"]').last()
+        # Scroll strategy 1: scroll last tile into view (Playwright handles container)
+        scrolled = False
         try:
-            await last_tile.scroll_into_view_if_needed(timeout=3000)
-        except Exception:
-            await page.mouse.wheel(0, 2000)
-        await page.wait_for_timeout(2500)
+            await page.locator('a[href*="/photo/"]').last.scroll_into_view_if_needed(timeout=2000)
+            scrolled = True
+        except Exception as e:
+            log.debug("scroll_into_view failed: %s", e)
 
-        if log.isEnabledFor(logging.DEBUG):
-            screenshot_path = DATA_DIR / f"debug_scroll_iter{no_new}.png"
-            await page.screenshot(path=str(screenshot_path), full_page=False)
-            url = page.url
-            log.debug("After scroll iter %d: URL=%s screenshot=%s", no_new, url, screenshot_path)
+        # Scroll strategy 2: scroll the main content container via JS
+        if not scrolled:
+            try:
+                await page.evaluate("""
+                    const container = document.querySelector('[role="main"]') ||
+                                      document.querySelector('main') ||
+                                      document.querySelector('[data-view-type]') ||
+                                      document.documentElement;
+                    container.scrollBy(0, 2000);
+                """)
+                scrolled = True
+            except Exception as e:
+                log.debug("Container scroll failed: %s", e)
 
+        # Scroll strategy 3: mouse wheel on the photo grid area
+        if not scrolled:
+            await page.mouse.wheel(0, 3000)
+
+        # Wait for DOM to update — up to 4 s, break early if new tiles appear
+        initial_count = await page.evaluate(
+            "document.querySelectorAll('a[href*=\"/photo/\"]').length"
+        )
+        for _ in range(8):
+            await page.wait_for_timeout(500)
+            current_count = await page.evaluate(
+                "document.querySelectorAll('a[href*=\"/photo/\"]').length"
+            )
+            if current_count > initial_count:
+                log.debug("New tiles loaded: %d → %d", initial_count, current_count)
+                break
+
+        if log.isEnabledFor(logging.DEBUG) and scroll_attempt % 5 == 0:
+            screenshot_path = DATA_DIR / f"debug_scroll_iter{scroll_attempt}.png"
+            try:
+                await page.screenshot(path=str(screenshot_path), full_page=False)
+                log.debug("Screenshot saved: %s (URL=%s)", screenshot_path, page.url)
+            except Exception:
+                pass
+
+    log.debug("Scroll complete: %d iterations, %d items", scroll_attempt, len(seen))
     return seen
 
 
