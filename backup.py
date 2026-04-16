@@ -337,23 +337,30 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
 
         no_new = 0 if added else no_new + 1
 
-        # Try multiple scroll strategies; Google Photos' virtual-scroll handler
-        # only fires when the right element receives a scroll/wheel event.
+        # Scroll the element with the largest scrollHeight — Google Photos uses a
+        # virtual-scroll container that isn't always the first overflowing element.
+        # We also scroll the document root as a fallback.
+        # NOTE: Do NOT use page.keyboard.press("End") — Google Photos intercepts the
+        # End key as a navigation shortcut and navigates away from the library page.
         await page.evaluate("""
-            // 1. Scroll the deepest overflowing element
-            const all = [...document.querySelectorAll('*')];
-            const scroller = all.find(
-                el => el.scrollHeight > el.clientHeight + 50 &&
-                      ['auto','scroll','overlay'].includes(getComputedStyle(el).overflowY)
-            );
+            // Find the element with the largest scrollHeight among all scrollable elements
+            let maxScrollHeight = 0;
+            let scroller = null;
+            for (const el of document.querySelectorAll('*')) {
+                const style = getComputedStyle(el);
+                if (['auto', 'scroll', 'overlay'].includes(style.overflowY) &&
+                        el.scrollHeight > el.clientHeight + 50 &&
+                        el.scrollHeight > maxScrollHeight) {
+                    maxScrollHeight = el.scrollHeight;
+                    scroller = el;
+                }
+            }
             if (scroller) scroller.scrollTop += 4000;
 
-            // 2. Always also scroll the document
+            // Also scroll the document root as a fallback
             window.scrollBy(0, 4000);
             document.documentElement.scrollTop += 4000;
         """)
-        # Keyboard End in case neither JS scroll triggered the handler
-        await page.keyboard.press("End")
         await page.wait_for_timeout(2500)
 
     return seen
