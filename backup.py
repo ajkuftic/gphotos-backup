@@ -517,7 +517,7 @@ def download_item(
             time.sleep(2 ** attempt)
 
     log.error("Failed to download %s after 4 attempts", cdn_id[:24])
-    return False
+    raise RuntimeError(f"Failed after 4 attempts: {cdn_id[:24]}")
 
 
 # ---------------------------------------------------------------------------
@@ -591,16 +591,17 @@ async def do_backup(args: argparse.Namespace) -> None:
             try:
                 ok = download_item(session, item, state, dry_run=args.dry_run)
                 counts["downloaded" if ok else "skipped"] += 1
-                n = counts["downloaded"]
-                if n and n % 25 == 0:
-                    _save_state(state)
-                    log.info(
-                        "Progress — downloaded: %d  skipped: %d  errors: %d",
-                        n, counts["skipped"], counts["errors"],
-                    )
             except Exception as exc:
                 log.error("Error on %s: %s", item.get("cdnId", "?")[:24], exc)
                 counts["errors"] += 1
+                return
+            n = counts["downloaded"]
+            if n and n % 25 == 0:
+                _save_state(state)
+                log.info(
+                    "Progress — downloaded: %d  skipped: %d  errors: %d",
+                    n, counts["skipped"], counts["errors"],
+                )
 
         if not args.shared_only:
             log.info("Scanning library…")
