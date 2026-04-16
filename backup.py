@@ -337,9 +337,18 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
 
         no_new = 0 if added else no_new + 1
 
-        # Scroll the page to trigger Google Photos' virtual-scroll handler.
-        # PageDown key usually scrolls one viewport height.
-        await page.keyboard.press("PageDown")
+        # Scroll the page via JavaScript. PageDown/End open the photo viewer if a
+        # grid item has focus, so we blur first to prevent that interaction.
+        await page.evaluate("document.activeElement?.blur()")
+        await page.evaluate("""
+            window.scrollBy(0, 3000);
+            const all = [...document.querySelectorAll('*')];
+            const scroller = all.find(
+                el => el.scrollHeight > el.clientHeight + 50 &&
+                      ['auto','scroll','overlay'].includes(getComputedStyle(el).overflowY)
+            );
+            if (scroller) scroller.scrollTop += 3000;
+        """)
         await page.wait_for_timeout(2500)
 
         if log.isEnabledFor(logging.DEBUG):
