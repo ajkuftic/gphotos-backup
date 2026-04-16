@@ -342,6 +342,12 @@ async def _scroll_and_collect(page: Page, *, stable_rounds: int = 5) -> dict[str
         await page.keyboard.press("PageDown")
         await page.wait_for_timeout(2500)
 
+        if log.isEnabledFor(logging.DEBUG):
+            screenshot_path = DATA_DIR / f"debug_scroll_iter{no_new}.png"
+            await page.screenshot(path=str(screenshot_path), full_page=False)
+            url = page.url
+            log.debug("After scroll iter %d: URL=%s screenshot=%s", no_new, url, screenshot_path)
+
     return seen
 
 
